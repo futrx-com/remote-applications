@@ -1,0 +1,7 @@
+{
+  "id": "hello-remote",
+  "publisher": "futrx",
+  "maintainers": [],
+  "license": "AGPL-3.0-or-later",
+  "minRemote": "0.35.0"
+}

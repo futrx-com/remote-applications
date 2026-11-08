@@ -1,0 +1,28 @@
+name: validate
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: futrx-com/remote.futrx
+          ref: main
+          path: .core
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .core/backend/go.mod
+          cache-dependency-path: .core/**/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: tools/marketplace check-pr "origin/$GITHUB_BASE_REF"

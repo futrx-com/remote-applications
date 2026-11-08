@@ -1,0 +1,7 @@
+# The last matching line wins. Any one listed owner's approval satisfies it,
+# so application authors are never listed here: they go in listing.json.
+*               @futrx-com/marketplace-reviewers
+
+/.github/       @futrx-com/marketplace-admins
+/tools/         @futrx-com/marketplace-admins
+/keys/          @futrx-com/marketplace-admins

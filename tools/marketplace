@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# Marketplace tooling shared by CI and contributors.
+#
+#   tools/marketplace check <id>...          validate applications
+#   tools/marketplace check-pr <base-ref>    validate what a pull request changes
+#   tools/marketplace plan [<id>]            print applications whose version is unpublished
+#   tools/marketplace package <id> <dir>     build <id>-<version>.zip and its index entry
+#   tools/marketplace publish <dir>          sign the index and create the releases
+#
+# check needs a checkout of futrx-com/remote.futrx in $CORE (default .core):
+# applications are validated by Remote's own loader and tested in its catalog module.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+CORE=${CORE:-.core}
+MAX_FILES=8192
+MAX_UNPACKED=$((192 * 1024 * 1024))
+MAX_ZIP=$((64 * 1024 * 1024))
+
+die() { echo "error: $*" >&2; exit 1; }
+app_dir() { echo "applications/${1:0:1}/$1"; }
+listing() { echo "listings/${1:0:1}/$1/listing.json"; }
+version() { jq -er .version "$(app_dir "$1")/application.json"; }
+published() { git ls-remote --exit-code --tags origin "refs/tags/$1@$(version "$1")" >/dev/null; }
+all_ids() { find applications -mindepth 2 -maxdepth 2 -type d -printf '%f\n' | sort; }
+
+# Application ids touched by the given paths.
+ids_in() { sed -nE 's#^(applications|listings)/[^/]/([^/]+)/.*#\2#p' | sort -u; }
+
+check_one() {
+	local id=$1 dir manifest list
+	dir=$(app_dir "$id")
+	manifest=$dir/application.json
+	list=$(listing "$id")
+	echo "== $id"
+
+	[[ $id =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "$id: id must be lowercase letters, digits and dashes"
+	[ -d "$dir" ] || die "$id: missing $dir"
+	jq -e --arg id "$id" '.id == $id' "$manifest" >/dev/null || die "$id: application.json id must be $id"
+	[[ $(version "$id") =~ ^[A-Za-z0-9._-]+$ ]] || die "$id: version must use letters, digits, dot, dash or underscore"
+
+	local extra
+	extra=$(find "$dir" -mindepth 1 -maxdepth 1 -type f ! -name README.md ! -name application.json -printf '%f ')
+	[ -z "$extra" ] || die "$id: only README.md and application.json belong at the application root (found $extra)"
+	[ -z "$(find "$dir" ! -type f ! -type d)" ] || die "$id: symlinks and special files are refused"
+	(($(find "$dir" -type f | wc -l) <= MAX_FILES)) || die "$id: more than $MAX_FILES files"
+	(($(du -sb "$dir" | cut -f1) <= MAX_UNPACKED)) || die "$id: larger than 192 MiB"
+
+	jq -e --arg id "$id" '
+		.id == $id and (.publisher | type == "string" and length > 0)
+		and (.license | type == "string" and length > 0)
+		and (.minRemote | type == "string" and length > 0)
+		and (.maintainers | type == "array")' "$list" >/dev/null ||
+		die "$id: $list needs id, publisher, license, minRemote and maintainers"
+
+	find "$dir" -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
+
+	[ -d "$CORE/backend" ] || die "Remote core checkout not found at $CORE"
+	local stage
+	stage=$(mktemp -d)
+	mkdir -p "$stage/applications"
+	cp -r "$dir" "$stage/applications/$id"
+	mkdir -p "$CORE/backend/cmd/marketplace-validate"
+	cat >"$CORE/backend/cmd/marketplace-validate/main.go" <<-'GO'
+		package main
+
+		import (
+			"fmt"
+			"os"
+
+			"github.com/futrx-com/remote.futrx.com/internal/integration/containers/applications"
+		)
+
+		func main() {
+			if _, err := applications.NewRegistry(os.DirFS(os.Args[1]), nil); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+		}
+	GO
+	(cd "$CORE/backend" && go run ./cmd/marketplace-validate "$stage") || die "$id: rejected by Remote's application loader"
+
+	if [ -n "$(find "$dir" -name '*.go' -print -quit)" ]; then
+		rm -rf "$CORE/applications/$id"
+		cp -r "$dir" "$CORE/applications/$id"
+		(cd "$CORE" && go vet "./applications/$id/..." && go test "./applications/$id/...")
+	fi
+	local tests
+	mapfile -t tests < <(find "$dir" -name '*.test.mjs' | sort)
+	((${#tests[@]} == 0)) || node --test "${tests[@]}"
+}
+
+cmd_check() {
+	(($# > 0)) || set -- $(all_ids)
+	for id in "$@"; do check_one "$id"; done
+}
+
+cmd_check_pr() {
+	local base=$1 ids
+	ids=$(git diff --name-only "$base"...HEAD | ids_in)
+	[ -n "$ids" ] || { echo "No application changed."; return; }
+	(($(wc -l <<<"$ids") == 1)) || die "a pull request may change only one application (changed: $(echo $ids))"
+	[ -d "$(app_dir "$ids")" ] || { echo "$ids is being removed; nothing to validate."; return; }
+	if [ -n "$(git diff --name-only "$base"...HEAD -- "$(app_dir "$ids")")" ] && published "$ids"; then
+		die "$ids@$(version "$ids") is already published; bump version in application.json"
+	fi
+	check_one "$ids"
+}
+
+cmd_plan() {
+	local ids
+	if (($# > 0)) && [ -n "$1" ]; then
+		ids=$1
+	elif [ -z "${BEFORE:-}" ] || [[ $BEFORE =~ ^0+$ ]]; then
+		ids=$(all_ids)
+	else
+		ids=$(git diff --name-only "$BEFORE" HEAD | ids_in)
+	fi
+	for id in $ids; do
+		[ -d "$(app_dir "$id")" ] && ! published "$id" && echo "$id"
+	done
+	return 0
+}
+
+cmd_package() {
+	local id=$1 out dir ver file stage
+	out=$(realpath -m "$2")
+	dir=$(app_dir "$id")
+	ver=$(version "$id")
+	file=$id-$ver.zip
+	stage=$(mktemp -d)
+	mkdir -p "$out"
+	cp -r "$dir" "$stage/$id"
+	find "$stage/$id" -exec touch -h -d '2000-01-01T00:00:00Z' {} +
+	(cd "$stage" && find "$id" -type f | LC_ALL=C sort | TZ=UTC zip -X -D -q -@ "$out/$file")
+	(($(stat -c %s "$out/$file") <= MAX_ZIP)) || die "$file is larger than 64 MiB"
+	jq -n --slurpfile app "$dir/application.json" --slurpfile list "$(listing "$id")" \
+		--arg file "$file" --arg sha "$(sha256sum "$out/$file" | cut -d' ' -f1)" '
+		$app[0] as $a | $list[0] as $l | {
+			id: $a.id, name: $a.name, description: $a.description, category: $a.category,
+			publisher: $l.publisher, license: $l.license,
+			version: $a.version, minRemote: $l.minRemote, file: $file, sha256: $sha
+		}' >"$out/$id-$ver.entry.json"
+	echo "$out/$file"
+}
+
+cmd_publish() {
+	local dist=$1 work key now
+	: "${GITHUB_REPOSITORY:?}" "${GITHUB_SHA:?}" "${GITHUB_RUN_ID:?}" "${GITHUB_SERVER_URL:?}"
+	[ -n "${INDEX_SIGNING_KEY:-}" ] || die "INDEX_SIGNING_KEY is not set on the marketplace-release environment"
+	[ -f keys/index-signing.pub ] || die "keys/index-signing.pub is not committed"
+	work=$(mktemp -d)
+	key=$work/key.pem
+	trap "rm -f '$key'" EXIT
+	printf '%s\n' "$INDEX_SIGNING_KEY" >"$key"
+	openssl pkey -in "$key" -pubout | cmp -s - keys/index-signing.pub ||
+		die "INDEX_SIGNING_KEY does not match keys/index-signing.pub"
+
+	if gh release view index >/dev/null 2>&1; then
+		gh release download index -p index.json -p index.json.sig -D "$work"
+		base64 -d "$work/index.json.sig" >"$work/old.sig"
+		openssl pkeyutl -verify -pubin -inkey keys/index-signing.pub -rawin \
+			-in "$work/index.json" -sigfile "$work/old.sig" >/dev/null ||
+			die "the published index.json does not match its signature"
+	else
+		echo '{"schema":1,"applications":{}}' >"$work/index.json"
+	fi
+
+	now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	local entry tag
+	for entry in "$dist"/*.entry.json; do
+		tag=$(jq -r '"\(.id)@\(.version)"' "$entry")
+		jq --slurpfile e "$entry" --arg now "$now" \
+			--arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$tag/$(jq -r .file "$entry")" \
+			--arg commit "$GITHUB_SHA" --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" '
+			$e[0] as $e
+			| .applications[$e.id] |= ((. // {versions: []})
+				+ ($e | {name, description, category, publisher, license})
+				| .versions = ([.versions[] | select(.version != $e.version)]
+					+ [$e | {version, minRemote, sha256, url: $url, commit: $commit, run: $run, publishedAt: $now}]))
+			| .generatedAt = $now' "$work/index.json" >"$work/next.json"
+		mv "$work/next.json" "$work/index.json"
+	done
+	openssl pkeyutl -sign -inkey "$key" -rawin -in "$work/index.json" | base64 -w0 >"$work/index.json.sig"
+
+	for entry in "$dist"/*.entry.json; do
+		tag=$(jq -r '"\(.id)@\(.version)"' "$entry")
+		gh release create "$tag" "$dist/$(jq -r .file "$entry")" --target "$GITHUB_SHA" \
+			--title "$(jq -r '"\(.name) \(.version)"' "$entry")" --notes "sha256: $(jq -r .sha256 "$entry")"
+	done
+	gh release view index >/dev/null 2>&1 ||
+		gh release create index --target "$GITHUB_SHA" --latest=false \
+			--title "Marketplace index" --notes "Signed list of published applications."
+	gh release upload index "$work/index.json" "$work/index.json.sig" --clobber
+}
+
+case ${1:-} in
+check) shift; cmd_check "$@" ;;
+check-pr) shift; cmd_check_pr "$@" ;;
+plan) shift; cmd_plan "$@" ;;
+package) shift; cmd_package "$@" ;;
+publish) shift; cmd_publish "$@" ;;
+*) sed -n '2,10p' "$0"; exit 2 ;;
+esac

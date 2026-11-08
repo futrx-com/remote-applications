@@ -1,0 +1,78 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths: ["applications/**", "listings/**"]
+  workflow_dispatch:
+    inputs:
+      app:
+        description: Application id
+        required: true
+
+concurrency:
+  group: release
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.plan.outputs.apps }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: plan
+        env:
+          BEFORE: ${{ github.event.before }}
+          APP: ${{ inputs.app }}
+        run: echo "apps=$(tools/marketplace plan "$APP" | xargs)" >> "$GITHUB_OUTPUT"
+      - if: steps.plan.outputs.apps != ''
+        uses: actions/checkout@v4
+        with:
+          repository: futrx-com/remote.futrx
+          ref: main
+          path: .core
+      - if: steps.plan.outputs.apps != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: .core/backend/go.mod
+          cache-dependency-path: .core/**/go.sum
+      - if: steps.plan.outputs.apps != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - if: steps.plan.outputs.apps != ''
+        env:
+          APPS: ${{ steps.plan.outputs.apps }}
+        run: |
+          for id in $APPS; do
+            tools/marketplace check "$id"
+            tools/marketplace package "$id" dist
+          done
+      - if: steps.plan.outputs.apps != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist/
+
+  publish:
+    needs: build
+    if: needs.build.outputs.apps != ''
+    runs-on: ubuntu-latest
+    environment: marketplace-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist/
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          INDEX_SIGNING_KEY: ${{ secrets.INDEX_SIGNING_KEY }}
+        run: tools/marketplace publish dist
