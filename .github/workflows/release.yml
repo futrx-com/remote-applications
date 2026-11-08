@@ -3,12 +3,11 @@ name: release
 on:
   push:
     branches: [main]
-    paths: ["applications/**"]
   workflow_dispatch:
     inputs:
       app:
-        description: Application id
-        required: true
+        description: Application id (empty for every unpublished version)
+        required: false
 
 concurrency:
   group: release
@@ -27,7 +26,6 @@ jobs:
           fetch-depth: 0
       - id: plan
         env:
-          BEFORE: ${{ github.event.before }}
           APP: ${{ inputs.app }}
         run: echo "apps=$(tools/marketplace plan "$APP" | xargs)" >> "$GITHUB_OUTPUT"
       - if: steps.plan.outputs.apps != ''

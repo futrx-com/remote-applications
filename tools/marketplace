@@ -3,7 +3,7 @@
 #
 #   tools/marketplace check <id>...          validate applications
 #   tools/marketplace check-pr <base-ref>    validate what a pull request changes
-#   tools/marketplace plan [<id>]            print applications whose version is unpublished
+#   tools/marketplace plan [<id>]            print applications whose current version is unpublished
 #   tools/marketplace package <id> <dir>     build <id>-<version>.zip and its index entry
 #   tools/marketplace publish <dir>          sign the index and create the releases
 #
@@ -99,16 +99,10 @@ cmd_check_pr() {
 }
 
 cmd_plan() {
-	local ids
-	if (($# > 0)) && [ -n "$1" ]; then
-		ids=$1
-	elif [ -z "${BEFORE:-}" ] || [[ $BEFORE =~ ^0+$ ]]; then
-		ids=$(all_ids)
-	else
-		ids=$(git diff --name-only "$BEFORE" HEAD | ids_in)
-	fi
-	for id in $ids; do
-		[ -d "$(app_dir "$id")" ] && ! published "$id" && echo "$id"
+	local tags id
+	tags=$(git ls-remote --tags --refs origin | sed 's#.*refs/tags/##')
+	for id in ${1:-$(all_ids)}; do
+		[ -d "$(app_dir "$id")" ] && ! grep -qxF "$id@$(version "$id")" <<<"$tags" && echo "$id"
 	done
 	return 0
 }
