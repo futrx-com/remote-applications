@@ -3,7 +3,7 @@ name: release
 on:
   push:
     branches: [main]
-    paths: ["applications/**", "listings/**"]
+    paths: ["applications/**"]
   workflow_dispatch:
     inputs:
       app:

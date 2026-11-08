@@ -19,19 +19,17 @@ MAX_ZIP=$((64 * 1024 * 1024))
 
 die() { echo "error: $*" >&2; exit 1; }
 app_dir() { echo "applications/${1:0:1}/$1"; }
-listing() { echo "listings/${1:0:1}/$1/listing.json"; }
 version() { jq -er .version "$(app_dir "$1")/application.json"; }
 published() { git ls-remote --exit-code --tags origin "refs/tags/$1@$(version "$1")" >/dev/null; }
 all_ids() { find applications -mindepth 2 -maxdepth 2 -type d -printf '%f\n' | sort; }
 
 # Application ids touched by the given paths.
-ids_in() { sed -nE 's#^(applications|listings)/[^/]/([^/]+)/.*#\2#p' | sort -u; }
+ids_in() { sed -nE 's#^applications/[^/]/([^/]+)/.*#\1#p' | sort -u; }
 
 check_one() {
-	local id=$1 dir manifest list
+	local id=$1 dir manifest
 	dir=$(app_dir "$id")
 	manifest=$dir/application.json
-	list=$(listing "$id")
 	echo "== $id"
 
 	[[ $id =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "$id: id must be lowercase letters, digits and dashes"
@@ -45,13 +43,6 @@ check_one() {
 	[ -z "$(find "$dir" ! -type f ! -type d)" ] || die "$id: symlinks and special files are refused"
 	(($(find "$dir" -type f | wc -l) <= MAX_FILES)) || die "$id: more than $MAX_FILES files"
 	(($(du -sb "$dir" | cut -f1) <= MAX_UNPACKED)) || die "$id: larger than 192 MiB"
-
-	jq -e --arg id "$id" '
-		.id == $id and (.publisher | type == "string" and length > 0)
-		and (.license | type == "string" and length > 0)
-		and (.minRemote | type == "string" and length > 0)
-		and (.maintainers | type == "array")' "$list" >/dev/null ||
-		die "$id: $list needs id, publisher, license, minRemote and maintainers"
 
 	find "$dir" -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
 
@@ -134,13 +125,9 @@ cmd_package() {
 	find "$stage/$id" -exec touch -h -d '2000-01-01T00:00:00Z' {} +
 	(cd "$stage" && find "$id" -type f | LC_ALL=C sort | TZ=UTC zip -X -D -q -@ "$out/$file")
 	(($(stat -c %s "$out/$file") <= MAX_ZIP)) || die "$file is larger than 64 MiB"
-	jq -n --slurpfile app "$dir/application.json" --slurpfile list "$(listing "$id")" \
-		--arg file "$file" --arg sha "$(sha256sum "$out/$file" | cut -d' ' -f1)" '
-		$app[0] as $a | $list[0] as $l | {
-			id: $a.id, name: $a.name, description: $a.description, category: $a.category,
-			publisher: $l.publisher, license: $l.license,
-			version: $a.version, minRemote: $l.minRemote, file: $file, sha256: $sha
-		}' >"$out/$id-$ver.entry.json"
+	jq --arg file "$file" --arg sha "$(sha256sum "$out/$file" | cut -d' ' -f1)" \
+		'{id, name, description, category, version, file: $file, sha256: $sha}' \
+		"$dir/application.json" >"$out/$id-$ver.entry.json"
 	echo "$out/$file"
 }
 
@@ -175,9 +162,9 @@ cmd_publish() {
 			--arg commit "$GITHUB_SHA" --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" '
 			$e[0] as $e
 			| .applications[$e.id] |= ((. // {versions: []})
-				+ ($e | {name, description, category, publisher, license})
+				+ ($e | {name, description, category})
 				| .versions = ([.versions[] | select(.version != $e.version)]
-					+ [$e | {version, minRemote, sha256, url: $url, commit: $commit, run: $run, publishedAt: $now}]))
+					+ [$e | {version, sha256, url: $url, commit: $commit, run: $run, publishedAt: $now}]))
 			| .generatedAt = $now' "$work/index.json" >"$work/next.json"
 		mv "$work/next.json" "$work/index.json"
 	done

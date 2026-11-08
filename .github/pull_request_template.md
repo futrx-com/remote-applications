@@ -2,7 +2,7 @@ Application: `<id>` · version: `<version>`
 
 - [ ] This pull request changes one application only.
 - [ ] `version` is bumped if anything under `applications/` changed.
-- [ ] I am listed in `maintainers`, or this is a new application.
+- [ ] I license this application under AGPL-3.0-or-later, the license of this repository.
 
 Reviewer:
 

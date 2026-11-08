@@ -8,20 +8,10 @@ Reviewed applications for [remote.futrx](https://github.com/futrx-com/remote.fut
 2. Add your application to `applications/<first letter>/<id>/`, for example
    `applications/h/hello-remote/`. The format is documented in
    [installable applications](https://github.com/futrx-com/remote.futrx/tree/main/docs/dev/installable-applications).
-3. Add `listings/<first letter>/<id>/listing.json`:
+3. Open a pull request. Change one application per pull request.
 
-   ```json
-   {
-     "id": "hello-remote",
-     "publisher": "your-name",
-     "maintainers": ["your-github-handle"],
-     "license": "MIT",
-     "minRemote": "0.35.0"
-   }
-   ```
-
-   `maintainers` are the GitHub accounts allowed to change the application later.
-4. Open a pull request. Change one application per pull request.
+Every application here is licensed under [AGPL-3.0-or-later](LICENSE), the
+license of Remote. Submitting one means you license it the same way.
 
 ## Update an application
 
